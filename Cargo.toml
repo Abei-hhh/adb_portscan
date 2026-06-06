@@ -1,0 +1,14 @@
+[package]
+name = "adb_portScan"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "adb_portScan"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
