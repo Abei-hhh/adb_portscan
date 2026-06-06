@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "adb_portScan"
-version = "0.2.0"
+name = "adb_portscan"
+version = "0.3.0"

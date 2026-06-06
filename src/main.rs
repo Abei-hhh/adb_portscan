@@ -1,26 +1,23 @@
-mod detect;
-mod mdns;
-mod output;
-mod platform;
-mod ports;
-mod scan;
-mod target;
-mod threads;
+//! `adb_portScan` CLI — thin shell around the `adb_portscan` library.
+
+mod ctrl_c;
 
 use std::env;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::detect::AdbKind;
-use crate::platform::{install_ctrlc_handler, stop_requested, wait_any_key};
-use crate::ports::default_ports;
-use crate::scan::{Hit, ScanCfg};
-use crate::target::{parse_targets, Target};
-use crate::threads::{auto_threads, HARD_MAX_THREADS};
+use adb_portscan::{
+    auto_threads, default_ports, parse_targets, run, AdbKind, CancellationToken, Hit, ScanCfg,
+    ScanEvent, Target, HARD_MAX_THREADS,
+};
+
+#[cfg(feature = "mdns")]
+use adb_portscan::{discover, AdbServiceKind};
 
 fn main() {
-    install_ctrlc_handler();
+    let token = CancellationToken::new();
+    ctrl_c::install(token.clone());
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
         interactive_mode();
@@ -36,11 +33,10 @@ fn interactive_mode() {
     println!("   ADB 无线调试端口扫描器");
     println!("================================\n");
 
-    // mDNS 优先尝试
     try_mdns_discover();
 
     loop {
-        if stop_requested() {
+        if ctrl_c::token().is_cancelled() {
             println!("\n[Ctrl+C] 已中断。");
             break;
         }
@@ -49,7 +45,7 @@ fn interactive_mode() {
             None => break,
         };
         run_scan(&targets);
-        if stop_requested() {
+        if ctrl_c::token().is_cancelled() {
             println!("\n[Ctrl+C] 已中断。");
             break;
         }
@@ -58,12 +54,13 @@ fn interactive_mode() {
         }
     }
 
-    wait_any_key("\n按任意键退出...");
+    ctrl_c::wait_any_key("\n按任意键退出...");
 }
 
+#[cfg(feature = "mdns")]
 fn try_mdns_discover() {
     println!("正在通过 mDNS 搜索同网段 ADB 服务 (1.5s) ...");
-    let results = mdns::discover(Duration::from_millis(1500));
+    let results = discover(Duration::from_millis(1500));
     if results.is_empty() {
         println!("mDNS 未发现 ADB 服务，可继续手动输入 IP 扫描。\n");
         return;
@@ -74,7 +71,7 @@ fn try_mdns_discover() {
     }
     let recommend = results
         .iter()
-        .find(|s| matches!(s.kind, mdns::AdbServiceKind::Connect | mdns::AdbServiceKind::Legacy))
+        .find(|s| matches!(s.kind, AdbServiceKind::Connect | AdbServiceKind::Legacy))
         .unwrap_or(&results[0]);
     println!(
         "\n推荐直接执行: adb connect {}:{}\n",
@@ -82,9 +79,14 @@ fn try_mdns_discover() {
     );
 }
 
+#[cfg(not(feature = "mdns"))]
+fn try_mdns_discover() {
+    // mdns feature disabled; nothing to discover.
+}
+
 fn prompt_target() -> Option<Vec<Target>> {
     loop {
-        if stop_requested() {
+        if ctrl_c::token().is_cancelled() {
             return None;
         }
         print!(
@@ -94,10 +96,9 @@ fn prompt_target() -> Option<Vec<Target>> {
         let mut buf = String::new();
         let n = std::io::stdin().read_line(&mut buf).unwrap_or(0);
         if n == 0 {
-            // EOF (Ctrl+Z + Enter 在 Windows)
             return None;
         }
-        if stop_requested() {
+        if ctrl_c::token().is_cancelled() {
             return None;
         }
         let s = buf.trim();
@@ -133,18 +134,6 @@ fn run_scan(targets: &[Target]) {
     let work_items = targets.len() * ports.len();
     let decision = auto_threads(work_items);
 
-    let cfg = ScanCfg {
-        targets: targets.to_vec(),
-        ports: Arc::clone(&ports),
-        threads: decision.chosen,
-        fast_timeout: Duration::from_millis(100),
-        slow_timeout: Duration::from_millis(800),
-        verify_timeout: Duration::from_millis(800),
-        verify_adb: true,
-        stop_on_first: true,
-        stack_size: decision.stack_bytes,
-    };
-
     println!(
         "\n[资源] {} 逻辑核 | 物理内存 {} / 可用 {} MB",
         decision.cores,
@@ -155,7 +144,7 @@ fn run_scan(targets: &[Target]) {
         "[线程] 选用 {} 线程 (硬上限 {}) | 栈 {}KB/线程",
         decision.chosen,
         HARD_MAX_THREADS,
-        cfg.stack_size / 1024
+        decision.stack_bytes / 1024
     );
     println!(
         "[目标] {} 个 IP × {} 端口 = {} 工作项",
@@ -165,11 +154,59 @@ fn run_scan(targets: &[Target]) {
     );
     println!("[策略] 两遍扫描: 100ms 快扫 → 800ms 复扫未响应端口 | 命中即停\n");
 
-    let started = Instant::now();
-    let hits = scan::run(cfg);
-    let elapsed = started.elapsed();
+    let cfg = ScanCfg::builder(targets.to_vec(), Arc::clone(&ports))
+        .threads(decision.chosen)
+        .stack_size(decision.stack_bytes)
+        .fast_timeout(Duration::from_millis(100))
+        .slow_timeout(Duration::from_millis(800))
+        .verify_timeout(Duration::from_millis(800))
+        .cancel(ctrl_c::token())
+        .on_event(stderr_event_printer())
+        .build();
 
-    print_results(&hits, elapsed);
+    let started = Instant::now();
+    let hits = run(cfg);
+    print_results(&hits, started.elapsed());
+}
+
+fn stderr_event_printer() -> impl Fn(ScanEvent) + Send + Sync + 'static {
+    |ev| match ev {
+        ScanEvent::PassStarted {
+            pass,
+            work_items,
+            timeout,
+        } => {
+            eprintln!(
+                "[Pass {pass}/2] {work_items} 工作项, 超时 {}ms",
+                timeout.as_millis()
+            );
+        }
+        ScanEvent::Progress { done, total, .. } => {
+            eprintln!("  进度 {done}/{total}");
+        }
+        ScanEvent::PortHit(h) => {
+            let tag = match h.kind {
+                AdbKind::Plain => "[ADB-Plain]",
+                AdbKind::Tls => "[ADB-TLS]",
+                AdbKind::Open => "[open]",
+            };
+            eprintln!("  发现 {}:{} {}", h.target.display, h.port, tag);
+        }
+        ScanEvent::PassSkipped {
+            remaining, reason, ..
+        } => {
+            eprintln!("[Pass 2/2] 跳过 ({reason:?}, 剩余 {remaining})");
+        }
+        ScanEvent::ThreadsSpawned {
+            requested, actual, ..
+        } => {
+            if requested != actual {
+                eprintln!(
+                    "  注意: 申请 {requested} 线程, 实际起了 {actual} (系统资源限制)"
+                );
+            }
+        }
+    }
 }
 
 fn print_results(hits: &[Hit], elapsed: Duration) {
@@ -228,23 +265,11 @@ fn cli_mode(args: Vec<String>) {
 
     let ports = Arc::new(ports);
     let work_items = targets.len() * ports.len();
-    let decision = auto_threads(work_items);
+    let decision = auto_threads(work_items.max(1));
     let threads = match threads_arg {
         ThreadArg::Auto => decision.chosen,
-        ThreadArg::Max => HARD_MAX_THREADS.min(work_items),
-        ThreadArg::Fixed(n) => n.min(work_items),
-    };
-
-    let cfg = ScanCfg {
-        targets: targets.clone(),
-        ports: Arc::clone(&ports),
-        threads,
-        fast_timeout: Duration::from_millis(timeout_fast),
-        slow_timeout: Duration::from_millis(timeout_slow),
-        verify_timeout: Duration::from_millis(timeout_slow),
-        verify_adb,
-        stop_on_first,
-        stack_size: threads::stack_size_for(threads),
+        ThreadArg::Max => HARD_MAX_THREADS.min(work_items.max(1)),
+        ThreadArg::Fixed(n) => n.min(work_items.max(1)),
     };
 
     println!(
@@ -258,8 +283,19 @@ fn cli_mode(args: Vec<String>) {
         stop_on_first
     );
 
+    let cfg = ScanCfg::builder(targets.clone(), Arc::clone(&ports))
+        .threads(threads)
+        .fast_timeout(Duration::from_millis(timeout_fast))
+        .slow_timeout(Duration::from_millis(timeout_slow))
+        .verify_timeout(Duration::from_millis(timeout_slow))
+        .verify_adb(verify_adb)
+        .stop_on_first(stop_on_first)
+        .cancel(ctrl_c::token())
+        .on_event(stderr_event_printer())
+        .build();
+
     let started = Instant::now();
-    let hits = scan::run(cfg);
+    let hits = run(cfg);
     print_results(&hits, started.elapsed());
 }
 
@@ -321,13 +357,25 @@ fn parse_args(
                 };
             }
             "--timeout-fast" => {
-                timeout_fast = it.next().ok_or("--timeout-fast 缺少参数")?.parse().map_err(|_| "非法")?;
+                timeout_fast = it
+                    .next()
+                    .ok_or("--timeout-fast 缺少参数")?
+                    .parse()
+                    .map_err(|_| "非法")?;
             }
             "--timeout-slow" => {
-                timeout_slow = it.next().ok_or("--timeout-slow 缺少参数")?.parse().map_err(|_| "非法")?;
+                timeout_slow = it
+                    .next()
+                    .ok_or("--timeout-slow 缺少参数")?
+                    .parse()
+                    .map_err(|_| "非法")?;
             }
             "--timeout" => {
-                let v: u64 = it.next().ok_or("--timeout 缺少参数")?.parse().map_err(|_| "非法")?;
+                let v: u64 = it
+                    .next()
+                    .ok_or("--timeout 缺少参数")?
+                    .parse()
+                    .map_err(|_| "非法")?;
                 timeout_fast = v;
                 timeout_slow = v;
             }
@@ -346,7 +394,7 @@ fn parse_args(
     }
 
     let s = target_str.ok_or("缺少目标 (IP / 主机名 / CIDR)")?;
-    let targets = parse_targets(&s)?;
+    let targets = parse_targets(&s).map_err(|e| e.to_string())?;
     let ports: Vec<u16> = match custom_range {
         Some((s, e)) => (s..=e).collect(),
         None => default_ports(),

@@ -21,7 +21,7 @@ Android 11+ wireless debugging picks a random port in the Linux ephemeral range 
 
 ## Build
 
-Requires Rust 1.70+ (edition 2021).
+Requires Rust 1.70+ (edition 2021), zero runtime dependencies.
 
 ```bash
 git clone https://github.com/Abei-hhh/adb_portscan
@@ -31,6 +31,55 @@ cargo build --release
 ```
 
 The release profile uses `lto = true`, `codegen-units = 1`, `strip = true` for a small, fast binary.
+
+## Use as a library
+
+This crate is dual: the same code is available as a Rust library for other projects to embed. Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan" }
+# Or, if mDNS isn't needed:
+# adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan", default-features = false }
+```
+
+Minimal scan:
+
+```rust
+use std::sync::Arc;
+use adb_portscan::{default_ports, parse_targets, run, ScanCfg};
+
+let targets = parse_targets("192.168.1.42")?;
+let cfg = ScanCfg::builder(targets, Arc::new(default_ports())).build();
+for h in run(cfg) {
+    println!("{}:{} {:?}", h.target.display, h.port, h.kind);
+}
+```
+
+Streaming events and cancellation:
+
+```rust
+use std::sync::Arc;
+use adb_portscan::{default_ports, parse_targets, run_streaming, CancellationToken, ScanCfg, ScanEvent};
+
+let token = CancellationToken::new();
+let cfg = ScanCfg::builder(
+    parse_targets("192.168.1.0/24")?,
+    Arc::new(default_ports()),
+).cancel(token.clone()).build();
+
+let (handle, rx) = run_streaming(cfg);
+for ev in rx {
+    if let ScanEvent::PortHit(h) = ev {
+        println!("hit {}:{}", h.target.display, h.port);
+        token.cancel(); // stop the scan from any thread
+    }
+}
+let _final_hits = handle.join().unwrap();
+```
+
+### Features
+- `mdns` (default): includes the `mdns` module for local ADB-service discovery via multicast DNS. Disable with `default-features = false` if you only need the scanner.
 
 ## Usage
 

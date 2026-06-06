@@ -120,9 +120,9 @@ fn try_tls(stream: &mut TcpStream, read_timeout: Duration) -> bool {
     resp[0] == 0x16 && resp[1] == 0x03 && (0x01..=0x04).contains(&resp[2])
 }
 
-/// 对一个已知开放的端口做 ADB 协议探测：先试明文 ADB，再试 TLS。
-/// 探测各自需要独立的 TCP 连接（首次写脏了不能复用）。
-pub fn detect(addr: SocketAddr, connect_timeout: Duration, verify_timeout: Duration) -> AdbKind {
+/// Probe an open TCP endpoint: try plaintext ADB first, then TLS.
+/// Each probe needs a fresh TCP connection (the previous write dirties the stream).
+pub fn probe(addr: SocketAddr, connect_timeout: Duration, verify_timeout: Duration) -> AdbKind {
     if let Ok(mut s) = TcpStream::connect_timeout(&addr, connect_timeout) {
         if try_adb(&mut s, verify_timeout) {
             return AdbKind::Plain;
@@ -182,8 +182,57 @@ mod tests {
         assert!(h.len() >= 5);
         assert_eq!(h[0], 0x16); // Handshake
         assert_eq!(h[1], 0x03); // major
-        // record length 字段对应剩余字节数
+        // record length field equals remaining bytes
         let rec_len = u16::from_be_bytes([h[3], h[4]]) as usize;
         assert_eq!(h.len(), 5 + rec_len);
+    }
+
+    #[test]
+    fn verify_accepts_well_formed_auth() {
+        let mut hdr = [0u8; 24];
+        hdr[0..4].copy_from_slice(&A_AUTH.to_le_bytes());
+        hdr[20..24].copy_from_slice(&(A_AUTH ^ 0xFFFF_FFFF).to_le_bytes());
+        assert_eq!(verify_adb_header(&hdr), Some(A_AUTH));
+    }
+
+    #[test]
+    fn verify_rejects_oversized_payload() {
+        let mut hdr = [0u8; 24];
+        hdr[0..4].copy_from_slice(&A_CNXN.to_le_bytes());
+        let too_big = ADB_MAX_PAYLOAD + 1;
+        hdr[12..16].copy_from_slice(&too_big.to_le_bytes());
+        hdr[20..24].copy_from_slice(&(A_CNXN ^ 0xFFFF_FFFF).to_le_bytes());
+        assert_eq!(verify_adb_header(&hdr), None);
+    }
+
+    #[test]
+    fn verify_accepts_payload_at_max() {
+        let mut hdr = [0u8; 24];
+        hdr[0..4].copy_from_slice(&A_CNXN.to_le_bytes());
+        hdr[12..16].copy_from_slice(&ADB_MAX_PAYLOAD.to_le_bytes());
+        hdr[20..24].copy_from_slice(&(A_CNXN ^ 0xFFFF_FFFF).to_le_bytes());
+        assert_eq!(verify_adb_header(&hdr), Some(A_CNXN));
+    }
+
+    #[test]
+    fn cnxn_payload_carries_host_banner() {
+        let p = build_cnxn_packet();
+        let payload = &p[24..];
+        assert!(payload.starts_with(b"host::"));
+    }
+
+    #[test]
+    fn cnxn_packet_data_length_matches_payload() {
+        let p = build_cnxn_packet();
+        let data_len = u32::from_le_bytes(p[12..16].try_into().unwrap()) as usize;
+        assert_eq!(p.len(), 24 + data_len);
+    }
+
+    #[test]
+    fn cnxn_packet_crc_is_byte_sum() {
+        let p = build_cnxn_packet();
+        let stored_crc = u32::from_le_bytes(p[16..20].try_into().unwrap());
+        let calc_crc: u32 = p[24..].iter().map(|&b| b as u32).sum();
+        assert_eq!(stored_crc, calc_crc);
     }
 }

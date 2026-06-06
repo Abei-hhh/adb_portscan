@@ -1,11 +1,25 @@
 [package]
-name = "adb_portScan"
-version = "0.2.0"
+name = "adb_portscan"
+version = "0.3.0"
 edition = "2021"
+description = "Find Android ADB wireless-debugging ports on a LAN via full-port scan and protocol fingerprinting. Usable as both a library and a binary."
+license = "MIT"
+repository = "https://github.com/Abei-hhh/adb_portscan"
+keywords = ["adb", "android", "portscan", "wireless-debugging", "mdns"]
+categories = ["command-line-utilities", "network-programming"]
+readme = "README.md"
+
+[lib]
+name = "adb_portscan"
+path = "src/lib.rs"
 
 [[bin]]
 name = "adb_portScan"
 path = "src/main.rs"
+
+[features]
+default = ["mdns"]
+mdns = []
 
 [profile.release]
 lto = true

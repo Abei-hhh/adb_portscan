@@ -21,7 +21,7 @@ Android 11+ 的无线调试每次开启都会从 Linux 临时端口范围 (32768
 
 ## 编译
 
-需要 Rust 1.70+ (edition 2021)。
+需要 Rust 1.70+ (edition 2021)，零运行时依赖。
 
 ```bash
 git clone https://github.com/Abei-hhh/adb_portscan
@@ -31,6 +31,55 @@ cargo build --release
 ```
 
 release 配置启用了 `lto = true`、`codegen-units = 1`、`strip = true`，输出体积小、运行快。
+
+## 作为库使用
+
+本项目同时提供库 API，可在其他 Rust 项目里直接引用。`Cargo.toml`：
+
+```toml
+[dependencies]
+adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan" }
+# 不需要 mDNS 时:
+# adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan", default-features = false }
+```
+
+最小用法：
+
+```rust
+use std::sync::Arc;
+use adb_portscan::{default_ports, parse_targets, run, ScanCfg};
+
+let targets = parse_targets("192.168.1.42")?;
+let cfg = ScanCfg::builder(targets, Arc::new(default_ports())).build();
+for h in run(cfg) {
+    println!("{}:{} {:?}", h.target.display, h.port, h.kind);
+}
+```
+
+流式事件 + 取消：
+
+```rust
+use std::sync::Arc;
+use adb_portscan::{default_ports, parse_targets, run_streaming, CancellationToken, ScanCfg, ScanEvent};
+
+let token = CancellationToken::new();
+let cfg = ScanCfg::builder(
+    parse_targets("192.168.1.0/24")?,
+    Arc::new(default_ports()),
+).cancel(token.clone()).build();
+
+let (handle, rx) = run_streaming(cfg);
+for ev in rx {
+    if let ScanEvent::PortHit(h) = ev {
+        println!("命中 {}:{}", h.target.display, h.port);
+        token.cancel(); // 任意线程都可触发停止
+    }
+}
+let _final_hits = handle.join().unwrap();
+```
+
+### Feature 开关
+- `mdns` (默认开): 启用 `mdns` 模块，通过组播 DNS 发现局域网内的 ADB 服务。如果只需要扫描功能，可以 `default-features = false` 关掉。
 
 ## 使用方式
 
