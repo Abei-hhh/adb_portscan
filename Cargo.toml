@@ -1,6 +1,6 @@
 [package]
 name = "adb_portscan"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Find Android ADB wireless-debugging ports on a LAN via full-port scan and protocol fingerprinting. Usable as both a library and a binary."
 license = "MIT"
@@ -17,9 +17,18 @@ path = "src/lib.rs"
 name = "adb_portScan"
 path = "src/main.rs"
 
+[[bin]]
+name = "adb_portScan_gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
+
+[dependencies]
+eframe = { version = "0.36.1", optional = true }
+
 [features]
-default = ["mdns"]
+default = ["mdns", "gui"]
 mdns = []
+gui = ["dep:eframe", "mdns"]
 
 [profile.release]
 lto = true

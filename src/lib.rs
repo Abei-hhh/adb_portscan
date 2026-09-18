@@ -60,6 +60,7 @@
 
 #![warn(missing_debug_implementations)]
 
+pub mod cli;
 pub mod detect;
 mod error;
 pub mod ports;
@@ -70,8 +71,12 @@ pub mod threads;
 #[cfg(feature = "mdns")]
 pub mod mdns;
 
+#[cfg(feature = "gui")]
+pub mod gui;
+
 mod platform;
 
+pub use crate::cli::{parse_args as parse_cli_args, print_usage, ScanOptions, ThreadArg};
 pub use crate::detect::{probe, AdbKind};
 pub use crate::error::TargetError;
 pub use crate::ports::default_ports;
@@ -83,6 +88,9 @@ pub use crate::threads::{auto_threads, stack_size_for, ThreadDecision, HARD_MAX_
 
 #[cfg(feature = "mdns")]
 pub use crate::mdns::{discover, AdbService, AdbServiceKind};
+
+#[cfg(feature = "gui")]
+pub use crate::gui::run_gui;
 
 /// Best-effort (total, available) physical memory in MB, if the platform exposes it.
 /// Returns `None` on platforms where no implementation exists (currently anything non-Windows).

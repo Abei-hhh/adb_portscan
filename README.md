@@ -13,24 +13,49 @@ Android 11+ wireless debugging picks a random port in the Linux ephemeral range 
 - **Real ADB verification**, not just an open-TCP check:
   - Plain ADB: sends a host-side CNXN packet and validates the 24-byte response header (magic == cmd ^ 0xFFFFFFFF).
   - ADB over TLS: sends a TLS ClientHello and checks for a TLS ServerHello.
-- **mDNS discovery** on startup — finds `_adb-tls-connect._tcp` / `_adb-tls-pairing._tcp` / `_adb._tcp` and recommends a target before you even type an IP.
+- **mDNS discovery** on startup — finds `_adb-tls-connect._tcp` / `_adb-tls-pairing._tcp` / `_adb._tcp` and recommends a target before you even type an IP. A single device may advertise **both IPv4 and IPv6** addresses; all of them are kept and sorted by connect preference (IPv4 → global IPv6 → link-local IPv6).
 - **CIDR support** (up to /16) and IPv6 (including zone IDs like `fe80::1%2`).
 - **Auto-tuned threads** based on CPU cores and available memory, hard-capped at 65535.
 - **Stop-on-first-hit** by default; `--all` to scan everything.
-- Single static binary, no runtime deps.
+- **Floating-window GUI** (default `gui` feature): a borderless, always-on-top desktop window that auto-discovers devices via mDNS and offers one-click **re-scan**, copy-to-clipboard `adb connect` commands, one-click connect, manual IP full-port scans, a live **settings panel** (threads, timeouts, port range, ADB verification, stop-on-first), and **dark/light/system theme** switching. Command-line targets/options are applied directly to the GUI's pre-filled scan.
+- **Zero-dependency core**: the scanner library itself has no runtime dependencies; `eframe`/`egui` are only pulled in by the default `gui` feature.
 
 ## Build
 
-Requires Rust 1.70+ (edition 2021), zero runtime dependencies.
+Requires Rust 1.70+ (edition 2021). The scanner core has zero runtime dependencies; the default build (`mdns` + `gui` features) additionally pulls in `eframe`/`egui` for the floating window.
 
 ```bash
 git clone https://github.com/Abei-hhh/adb_portscan
 cd adb_portscan
 cargo build --release
-# Binary at: target/release/adb_portScan(.exe)
+# Binaries at: target/release/adb_portScan(.exe) and adb_portScan_gui(.exe)
 ```
 
 The release profile uses `lto = true`, `codegen-units = 1`, `strip = true` for a small, fast binary.
+
+Dependency-free build (library + no GUI):
+
+```bash
+cargo build --release --no-default-features --features mdns
+```
+
+### Binaries
+
+Two binaries are produced when the `gui` feature is enabled (on by default):
+
+- `adb_portScan` — GUI entry point with a console attached (handy for troubleshooting). Command-line targets/options are passed through to the GUI.
+- `adb_portScan_gui` — the same GUI built with the Windows GUI subsystem, so double-clicking it never pops a console window.
+
+### The floating window
+
+The GUI is a borderless, always-on-top, semi-transparent floating window whose width is fixed while its height auto-fits its content (no wasted blank area). It auto-discovers ADB devices via mDNS on startup and re-scans on one click. Per device:
+
+- **Left-click** a row to expand/collapse details (service type, instance, all addresses, port).
+- **Right-click** a row for a menu: **Connect now** (runs `adb connect` in the background and shows the result), **Scan this device**, copy the connect command, or expand details.
+- **×** closes, **─** minimizes, and **⚙** opens the settings panel; the title bar is draggable.
+- **Settings panel**: adjust threads, fast/slow timeouts, port range, ADB verification, stop-on-first, and theme (dark/light/system).
+
+Manual full-port scans with a live progress bar, elapsed time, and stop button are also supported.
 
 ## Use as a library
 
@@ -39,8 +64,10 @@ This crate is dual: the same code is available as a Rust library for other proje
 ```toml
 [dependencies]
 adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan" }
-# Or, if mDNS isn't needed:
+# Lean, dependency-free scanner (no GUI, no mDNS):
 # adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan", default-features = false }
+# Scanner + mDNS without the GUI:
+# adb_portscan = { git = "https://github.com/Abei-hhh/adb_portscan", default-features = false, features = ["mdns"] }
 ```
 
 Minimal scan:
@@ -80,41 +107,37 @@ let _final_hits = handle.join().unwrap();
 
 ### Features
 - `mdns` (default): includes the `mdns` module for local ADB-service discovery via multicast DNS. Disable with `default-features = false` if you only need the scanner.
+- `gui` (default): the floating-window GUI module plus the `adb_portScan` / `adb_portScan_gui` binaries; pulls in `eframe`/`egui`. Disable with `default-features = false` for a lean, dependency-free scanner library.
 
 ## Usage
 
-### Interactive mode
+### Floating-window GUI
 
-Run with no arguments (or double-click the `.exe` on Windows):
-
-```
-adb_portScan
-```
-
-You'll see something like:
+The default build starts the floating window — no subcommand needed:
 
 ```
-================================
-   ADB Wireless Debug Port Scanner
-================================
-
-Searching for ADB services via mDNS (1.5s) ...
-
-mDNS found 1 ADB service:
-  [tls-connect] 192.168.1.42:43219  (adb-XXXX)
-
-Recommended: adb connect 192.168.1.42:43219
-
-Enter device IP / hostname / CIDR (e.g. 192.168.1.42 or 192.168.1.0/24, q to quit):
+adb_portScan                     # starts the GUI
+adb_portScan 192.168.1.42        # starts the GUI with the target pre-filled
 ```
 
-### CLI mode
+On Windows you can also use the no-console shortcut (double-click friendly):
 
 ```
-adb_portScan <target> [options]
+adb_portScan_gui
 ```
 
-Target can be:
+A small always-on-top floating window (drag the title bar to move it, `✕` to close):
+
+- On startup it runs an mDNS discovery and lists every ADB service with **all** of its IPv4/IPv6 addresses.
+- **↻ 重新扫描** re-runs mDNS discovery at any time.
+- Clicking a device row copies `adb connect <ip>:<port>` to the clipboard.
+- **Right-click** a device row for more actions: **Connect now**, **Scan this device**, copy command, expand details.
+- **📥 手动扫描** runs a full 1–65535 port scan on any IP / hostname / CIDR, with a live progress bar, elapsed/remaining time, and a ⏹ stop button.
+- **⚙ 设置面板** lets you tune threads, timeouts, port range, ADB verification, stop-on-first, and switch dark/light/system themes.
+
+### Command-line arguments
+
+There is no headless CLI mode any more — arguments configure the GUI's pre-filled manual scan. Target can be:
 
 | Form        | Example              |
 | ----------- | -------------------- |
@@ -124,7 +147,7 @@ Target can be:
 | Hostname    | `phone.local`        |
 | CIDR        | `192.168.1.0/24` (up to /16) |
 
-Options:
+Options (applied to the pre-filled scan):
 
 | Flag                 | Default     | Description                                              |
 | -------------------- | ----------- | -------------------------------------------------------- |
@@ -141,18 +164,20 @@ Options:
 ### Examples
 
 ```bash
-# Scan a single device, stop on first ADB hit
+# Open the GUI pre-filled for a single device
 adb_portScan 192.168.1.42
 
-# Sweep the whole /24
+# Pre-fill a whole /24 sweep
 adb_portScan 192.168.1.0/24
 
-# Only check the official ephemeral range
+# Pre-fill only the official ephemeral range
 adb_portScan 192.168.1.42 --range 32768-60999
 
-# Be aggressive (more threads, looser timeouts) on a slow Wi-Fi
+# Slow Wi-Fi: looser timeouts, more threads (pre-filled into the scan settings)
 adb_portScan 192.168.1.42 -t 4096 --timeout-fast 200 --timeout-slow 1500
 ```
+
+Need the results in your terminal instead? Use the [library API](#use-as-a-library) — `run` / `run_streaming` return every hit programmatically.
 
 ## How it picks the port order
 
@@ -165,19 +190,13 @@ Android 11+ assigns the debugging port from the kernel's local ephemeral range, 
 
 This way the first ADB hit usually comes back in well under a second.
 
-## Output
+## Hit classification
 
-On a hit:
+Every hit is protocol-verified before it is reported:
 
-```
->>> Found ADB port:
-    192.168.1.42:43219  [ADB over TLS (Android 11+)]
-
-Run this to connect:
-    adb connect 192.168.1.42:43219
-```
-
-If no ADB handshake responds but a port is open, it's reported as `[open]` so you can investigate.
+- **ADB over TLS (Android 11+)** — the port answered a TLS ServerHello to our ClientHello.
+- **Plain ADB** (`adb tcpip`) — valid CNXN response header (magic == cmd ^ 0xFFFFFFFF).
+- **`[open]`** — TCP open but no ADB handshake responded; reported so you can investigate.
 
 ## License
 
